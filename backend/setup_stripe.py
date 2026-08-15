@@ -12,13 +12,19 @@ CATALOG = [
         "emergent_product_id": "testify_pro",
         "name": "Testify Pro",
         "tax_code": "txcd_10103001",  # SaaS
-        "prices": [{"lookup_key": "pro_monthly", "amount": 2900, "currency": "usd", "interval": "month"}],
+        "prices": [
+            {"lookup_key": "pro_monthly", "amount": 2900, "currency": "usd", "interval": "month"},
+            {"lookup_key": "pro_yearly", "amount": 29000, "currency": "usd", "interval": "year"},
+        ],
     },
     {
         "emergent_product_id": "testify_business",
         "name": "Testify Business",
         "tax_code": "txcd_10103001",
-        "prices": [{"lookup_key": "business_monthly", "amount": 7900, "currency": "usd", "interval": "month"}],
+        "prices": [
+            {"lookup_key": "business_monthly", "amount": 7900, "currency": "usd", "interval": "month"},
+            {"lookup_key": "business_yearly", "amount": 79000, "currency": "usd", "interval": "year"},
+        ],
     },
 ]
 

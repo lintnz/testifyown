@@ -34,7 +34,7 @@ import stripe
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY") or "sk_test_emergent"
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
-PLAN_BY_LOOKUP = {"pro_monthly": "pro", "business_monthly": "business"}
+PLAN_BY_LOOKUP = {"pro_monthly": "pro", "pro_yearly": "pro", "business_monthly": "business", "business_yearly": "business"}
 
 
 def _is_unlimited(plan):
@@ -1014,11 +1014,14 @@ async def widget_js():
 @api.get("/plans")
 async def list_plans():
     return [
-        {"id": "free", "name": "Free", "price": 0, "lookup_key": None,
+        {"id": "free", "name": "Free", "price_monthly": 0, "price_yearly": 0,
+         "lookup_monthly": None, "lookup_yearly": None,
          "features": ["1 collection page", "Up to 20 testimonials", "1 basic widget", "Testify branding"]},
-        {"id": "pro", "name": "Pro", "price": 29, "lookup_key": "pro_monthly",
+        {"id": "pro", "name": "Pro", "price_monthly": 29, "price_yearly": 290,
+         "lookup_monthly": "pro_monthly", "lookup_yearly": "pro_yearly",
          "features": ["Unlimited collection pages", "Unlimited testimonials", "Video testimonials", "Unlimited widgets", "Custom branding", "Analytics", "Remove Testify branding"]},
-        {"id": "business", "name": "Business", "price": 79, "lookup_key": "business_monthly",
+        {"id": "business", "name": "Business", "price_monthly": 79, "price_yearly": 790,
+         "lookup_monthly": "business_monthly", "lookup_yearly": "business_yearly",
          "features": ["Everything in Pro", "Team members", "Advanced analytics", "Custom domain", "Priority support", "Advanced customization"]},
     ]
 
@@ -1078,6 +1081,7 @@ async def payment_status(session_id: str):
                     {"session_id": session_id, "payment_status": {"$ne": "paid"}},
                     {"$set": {"status": "completed", "payment_status": "paid",
                               "stripe_subscription_id": s.subscription,
+                              "stripe_customer_id": s.customer,
                               "updated_at": m.now_iso()}},
                 )
                 if res.modified_count:
@@ -1087,6 +1091,27 @@ async def payment_status(session_id: str):
             pass
     return {"session_id": rec["session_id"], "status": rec["status"],
             "payment_status": rec["payment_status"], "plan": rec.get("plan")}
+
+
+@api.post("/payments/portal")
+async def billing_portal(data: m.PortalInput, request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    rec = await db.payment_transactions.find_one(
+        {"workspace_id": ws["id"], "payment_status": "paid", "stripe_customer_id": {"$ne": None}},
+        {"_id": 0}, sort=[("updated_at", -1)],
+    )
+    if not rec or not rec.get("stripe_customer_id"):
+        raise HTTPException(status_code=400, detail="No active subscription to manage.")
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=rec["stripe_customer_id"],
+            return_url=data.origin_url.rstrip("/") + "/dashboard/settings",
+        )
+    except stripe.error.StripeError as e:
+        logger.error(f"Billing portal error: {e}")
+        raise HTTPException(status_code=500, detail="Could not open the billing portal. Please try again.")
+    return {"portal_url": session.url}
 
 
 @api.post("/stripe/webhook")
@@ -1102,7 +1127,8 @@ async def stripe_webhook(request: Request):
         res = await db.payment_transactions.update_one(
             {"session_id": obj["id"], "payment_status": {"$ne": "paid"}},
             {"$set": {"status": "completed", "payment_status": obj.get("payment_status", "paid"),
-                      "stripe_subscription_id": obj.get("subscription"), "updated_at": m.now_iso()}},
+                      "stripe_subscription_id": obj.get("subscription"),
+                      "stripe_customer_id": obj.get("customer"), "updated_at": m.now_iso()}},
         )
         if res.modified_count:
             await _apply_paid(obj["id"])

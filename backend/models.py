@@ -188,3 +188,7 @@ class SettingsInput(BaseModel):
 class CheckoutInput(BaseModel):
     lookup_key: str
     origin_url: str
+
+
+class PortalInput(BaseModel):
+    origin_url: str
