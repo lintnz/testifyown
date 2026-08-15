@@ -7,11 +7,13 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Star, Loader2, Upload, DownloadCloud } from "lucide-react";
+import { Star, Loader2, Upload, DownloadCloud, MapPin } from "lucide-react";
 import { toast } from "sonner";
 
 export default function ImportReviewDialog({ open, onClose }) {
   const qc = useQueryClient();
+  const [tab, setTab] = useState("manual");
+  const [gQuery, setGQuery] = useState("");
   const [f, setF] = useState({ first_name: "", last_name: "", company: "", role: "", text: "", rating: 5, source: "Google", avatar_url: null });
   const [uploading, setUploading] = useState(false);
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
@@ -21,6 +23,12 @@ export default function ImportReviewDialog({ open, onClose }) {
   const imp = useMutation({
     mutationFn: () => api.post("/testimonials/import", { ...f, rating: f.rating || null }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["testimonials"] }); qc.invalidateQueries({ queryKey: ["overview"] }); toast.success("Review imported & approved"); reset(); onClose(); },
+    onError: (e) => toast.error(formatApiError(e)),
+  });
+
+  const impGoogle = useMutation({
+    mutationFn: () => api.post("/testimonials/import-google", { query: gQuery }),
+    onSuccess: (r) => { qc.invalidateQueries({ queryKey: ["testimonials"] }); qc.invalidateQueries({ queryKey: ["overview"] }); toast.success(`Imported ${r.data.imported} Google review${r.data.imported === 1 ? "" : "s"}`); setGQuery(""); onClose(); },
     onError: (e) => toast.error(formatApiError(e)),
   });
 
@@ -35,7 +43,29 @@ export default function ImportReviewDialog({ open, onClose }) {
     <Dialog open={open} onOpenChange={onClose}>
       <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto" data-testid="import-dialog">
         <DialogHeader><DialogTitle className="flex items-center gap-2"><DownloadCloud size={18} /> Import a review</DialogTitle></DialogHeader>
-        <p className="text-sm text-muted-foreground -mt-2">Paste a review from Google, G2, Trustpilot, or anywhere. It's added as an approved testimonial.</p>
+        <div className="flex gap-1 p-1 rounded-xl bg-secondary/60 mb-1">
+          <button onClick={() => setTab("manual")} className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors ${tab === "manual" ? "bg-background shadow-sm" : "text-muted-foreground"}`} data-testid="import-tab-manual">Paste manually</button>
+          <button onClick={() => setTab("google")} className={`flex-1 py-2 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-1.5 ${tab === "google" ? "bg-background shadow-sm" : "text-muted-foreground"}`} data-testid="import-tab-google"><MapPin size={14} /> From Google</button>
+        </div>
+
+        {tab === "google" ? (
+          <div className="space-y-4 py-1">
+            <p className="text-sm text-muted-foreground">Pull recent reviews straight from Google. Requires a Google Places API key (set by your admin in Settings → Integrations).</p>
+            <div>
+              <Label htmlFor="g-query" className="mb-1.5 block">Business name or Google Place ID</Label>
+              <Input id="g-query" value={gQuery} onChange={(e) => setGQuery(e.target.value)} placeholder="e.g. Acme Coffee, San Francisco" data-testid="google-query" />
+              <p className="text-xs text-muted-foreground mt-1.5">Tip: use the exact business name as it appears on Google Maps.</p>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={onClose}>Cancel</Button>
+              <Button disabled={!gQuery.trim() || impGoogle.isPending} onClick={() => impGoogle.mutate()} data-testid="google-import-submit">
+                {impGoogle.isPending ? <Loader2 className="animate-spin" size={16} /> : "Import Google reviews"}
+              </Button>
+            </div>
+          </div>
+        ) : (
+        <>
+        <p className="text-sm text-muted-foreground -mt-1">Paste a review from Google, G2, Trustpilot, or anywhere. It's added as an approved testimonial.</p>
         <div className="space-y-4 py-1">
           <div className="grid grid-cols-2 gap-3">
             <div><Label htmlFor="imp-first" className="mb-1.5 block">First name *</Label><Input id="imp-first" value={f.first_name} onChange={(e) => set("first_name", e.target.value)} data-testid="imp-first" /></div>
@@ -76,6 +106,8 @@ export default function ImportReviewDialog({ open, onClose }) {
             {imp.isPending ? <Loader2 className="animate-spin" size={16} /> : "Import review"}
           </Button>
         </DialogFooter>
+        </>
+        )}
       </DialogContent>
     </Dialog>
   );

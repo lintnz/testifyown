@@ -28,6 +28,7 @@ from email_service import (
     password_reset_email,
 )
 from captcha import verify_recaptcha
+from settings_store import get_settings, get_setting, update_settings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("testify")
@@ -66,7 +67,17 @@ async def unique_slug(collection, base: str, exclude_id=None) -> str:
 
 
 def public_user(u: dict) -> dict:
-    return {k: u.get(k) for k in ["id", "name", "email", "avatar", "role", "auth_provider", "created_at"]}
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@testify.com")
+    base = {k: u.get(k) for k in ["id", "name", "email", "avatar", "role", "auth_provider", "created_at"]}
+    base["is_admin"] = u.get("email") == admin_email
+    return base
+
+
+async def require_admin(request: Request) -> dict:
+    user = await authlib.get_current_user(request)
+    if user.get("email") != os.environ.get("ADMIN_EMAIL", "admin@testify.com"):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user
 
 
 # ---------- Auth ----------
@@ -194,12 +205,12 @@ async def reset_password(data: m.ResetPasswordInput):
 
 # ---------- Workspace ----------
 async def _create_default_workspace(user_id: str, name: str):
-    slug = await unique_slug(db.workspaces, name)
+    from pymongo.errors import DuplicateKeyError
     ws = {
         "id": m.gen_id("ws_"),
         "owner_id": user_id,
         "name": name,
-        "slug": slug,
+        "slug": None,
         "logo_url": None,
         "primary_color": "#ff5722",
         "secondary_color": "#151515",
@@ -208,7 +219,18 @@ async def _create_default_workspace(user_id: str, name: str):
         "created_at": m.now_iso(),
         "updated_at": m.now_iso(),
     }
-    await db.workspaces.insert_one(ws)
+    for attempt in range(6):
+        ws["slug"] = await unique_slug(db.workspaces, name)
+        try:
+            await db.workspaces.insert_one(ws)
+            break
+        except DuplicateKeyError:
+            ws["slug"] = f"{slugify(name)}-{uuid.uuid4().hex[:5]}"
+            try:
+                await db.workspaces.insert_one(ws)
+                break
+            except DuplicateKeyError:
+                continue
     await db.workspace_members.insert_one({
         "id": m.gen_id("wm_"),
         "workspace_id": ws["id"],
@@ -482,6 +504,87 @@ async def import_testimonial(data: m.ManualImportInput, request: Request):
     return doc
 
 
+# ---------- Admin / Platform settings ----------
+@api.get("/public/config")
+async def public_config():
+    s = await get_settings()
+    return {"recaptcha_site_key": s.get("recaptcha_site_key", "")}
+
+
+@api.get("/admin/settings")
+async def admin_get_settings(request: Request):
+    await require_admin(request)
+    s = await get_settings()
+    return {**s, "google_places_configured": bool(s.get("google_places_api_key"))}
+
+
+@api.put("/admin/settings")
+async def admin_update_settings(data: m.SettingsInput, request: Request):
+    await require_admin(request)
+    payload = {k: v for k, v in data.model_dump(exclude_none=True).items()}
+    return await update_settings(payload)
+
+
+@api.post("/testimonials/import-google")
+async def import_google_reviews(data: m.GoogleImportInput, request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    key = await get_setting("google_places_api_key")
+    if not key:
+        raise HTTPException(status_code=400, detail="Google Places API key not configured. Ask your admin to add it in Settings → Integrations.")
+    query = data.query.strip()
+    place_id = query
+    # Resolve a place_id if the input is not already one
+    if not query.startswith("ChIJ"):
+        try:
+            find = requests.get(
+                "https://maps.googleapis.com/maps/api/place/findplacefromtext/json",
+                params={"input": query, "inputtype": "textquery", "fields": "place_id", "key": key},
+                timeout=15,
+            ).json()
+            candidates = find.get("candidates", [])
+            if not candidates:
+                raise HTTPException(status_code=404, detail="No Google business found for that name/URL. Try the exact business name.")
+            place_id = candidates[0]["place_id"]
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Google find place error: {e}")
+            raise HTTPException(status_code=502, detail="Could not reach Google Places. Check the API key.")
+    try:
+        details = requests.get(
+            "https://maps.googleapis.com/maps/api/place/details/json",
+            params={"place_id": place_id, "fields": "name,reviews", "key": key},
+            timeout=15,
+        ).json()
+    except Exception as e:
+        logger.error(f"Google details error: {e}")
+        raise HTTPException(status_code=502, detail="Could not fetch reviews from Google.")
+    if details.get("status") not in ("OK",):
+        raise HTTPException(status_code=400, detail=f"Google API error: {details.get('status')} — verify the key has Places API enabled.")
+    reviews = details.get("result", {}).get("reviews", []) or []
+    imported = 0
+    for r in reviews:
+        text = (r.get("text") or "").strip()
+        if not text:
+            continue
+        name_parts = (r.get("author_name") or "Google User").split(" ", 1)
+        doc = {
+            "id": m.gen_id("tst_"), "workspace_id": ws["id"], "collection_id": None,
+            "first_name": name_parts[0], "last_name": name_parts[1] if len(name_parts) > 1 else "",
+            "email": "", "company": "", "role": "", "website": r.get("author_url", ""),
+            "avatar_url": r.get("profile_photo_url"), "text": text, "video_url": None,
+            "video_thumbnail_url": None, "rating": r.get("rating"), "status": "approved",
+            "featured": False, "consent": True, "consent_text": "Imported from Google Reviews.",
+            "consent_at": m.now_iso(), "custom_answers": {}, "tags": ["Imported", "Google"],
+            "notes": "", "source": "Google", "submitted_at": m.now_iso(), "approved_at": m.now_iso(),
+            "created_at": m.now_iso(), "updated_at": m.now_iso(),
+        }
+        await db.testimonials.insert_one(doc)
+        imported += 1
+    return {"imported": imported, "business": details.get("result", {}).get("name")}
+
+
 # ---------- Widgets ----------
 DEFAULT_WIDGET_CONFIG = {
     "source": "approved",  # approved | featured | tag
@@ -735,7 +838,7 @@ async def submit_testimonial(slug: str, data: m.TestimonialSubmit, request: Requ
     col = await db.collections.find_one({"slug": slug}, {"_id": 0})
     if not col or not col.get("published"):
         raise HTTPException(status_code=404, detail="Collection page not found")
-    if not verify_recaptcha(data.recaptcha_token):
+    if not verify_recaptcha(data.recaptcha_token, await get_setting("recaptcha_secret_key")):
         raise HTTPException(status_code=400, detail="Captcha verification failed. Please try again.")
     if not data.text and not data.video_url:
         raise HTTPException(status_code=400, detail="Please provide a written or video testimonial")

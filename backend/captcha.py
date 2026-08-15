@@ -1,4 +1,3 @@
-import os
 import requests
 import logging
 
@@ -6,9 +5,9 @@ logger = logging.getLogger(__name__)
 VERIFY_URL = "https://www.google.com/recaptcha/api/siteverify"
 
 
-def verify_recaptcha(token: str) -> bool:
+def verify_recaptcha(token: str, secret: str) -> bool:
     """Returns True if valid or if reCAPTCHA is not configured (graceful fallback)."""
-    secret = (os.environ.get("RECAPTCHA_SECRET_KEY") or "").strip()
+    secret = (secret or "").strip()
     if not secret:
         return True  # not configured, rely on honeypot + rate limiting
     if not token:

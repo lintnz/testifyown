@@ -171,3 +171,15 @@ class ManualImportInput(BaseModel):
     rating: Optional[int] = None
     source: Optional[str] = "Imported"
     featured: bool = False
+
+
+class GoogleImportInput(BaseModel):
+    query: str
+
+
+class SettingsInput(BaseModel):
+    recaptcha_site_key: Optional[str] = None
+    recaptcha_secret_key: Optional[str] = None
+    resend_api_key: Optional[str] = None
+    sender_email: Optional[str] = None
+    google_places_api_key: Optional[str] = None

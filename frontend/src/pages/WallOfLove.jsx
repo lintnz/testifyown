@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import api, { mediaUrl } from "@/lib/api";
 import TestimonialWidget from "@/components/TestimonialWidget";
+import useMeta from "@/hooks/useMeta";
 import { Button } from "@/components/ui/button";
 import { Star, Loader2, AlertTriangle, Heart, PenLine } from "lucide-react";
 
@@ -16,10 +17,16 @@ export default function WallOfLove() {
         const res = await api.get(`/public/wall/${slug}`);
         setData(res.data);
         setStatus("ready");
-        document.title = `${res.data.business_name} — Wall of Love`;
       } catch (e) { setStatus("error"); }
     })();
   }, [slug]);
+
+  useMeta({
+    title: data ? `${data.business_name} — Wall of Love` : "Wall of Love",
+    description: data ? `See why ${data.count} customers love ${data.business_name}. Real testimonials and reviews.` : "Customer testimonials wall.",
+    image: data ? mediaUrl(data.logo_url) : null,
+    url: typeof window !== "undefined" ? window.location.href : null,
+  });
 
   const accent = data?.primary_color || "#ff5722";
 

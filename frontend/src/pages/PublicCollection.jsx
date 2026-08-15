@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import ReCAPTCHA from "react-google-recaptcha";
 import api, { formatApiError, mediaUrl } from "@/lib/api";
 import VideoRecorder from "@/components/VideoRecorder";
+import useMeta from "@/hooks/useMeta";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -20,6 +21,7 @@ export default function PublicCollection() {
   const [mode, setMode] = useState(null); // video|text
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(null);
+  const [recaptchaKey, setRecaptchaKey] = useState(RECAPTCHA_KEY);
 
   const [form, setForm] = useState({ first_name: "", last_name: "", email: "", company: "", role: "", website: "", text: "", rating: 0, consent: false, honeypot: "" });
   const [videoUrl, setVideoUrl] = useState(null);
@@ -29,6 +31,13 @@ export default function PublicCollection() {
 
   const accent = col?.brand_color || "#ff5722";
 
+  useMeta({
+    title: col ? `${col.headline || "Leave a testimonial"} · ${col.business_name}` : "Leave a testimonial",
+    description: col?.description || "Share your experience — it only takes a minute.",
+    image: col ? mediaUrl(col.logo_url) : null,
+    url: typeof window !== "undefined" ? window.location.href : null,
+  });
+
   useEffect(() => {
     (async () => {
       try {
@@ -36,6 +45,10 @@ export default function PublicCollection() {
         setCol(data);
         setStatus("ready");
       } catch (e) { setStatus("error"); }
+      try {
+        const cfg = await api.get(`/public/config`);
+        if (cfg.data?.recaptcha_site_key) setRecaptchaKey(cfg.data.recaptcha_site_key);
+      } catch (e) { /* non-blocking */ }
     })();
   }, [slug]);
 
@@ -174,8 +187,8 @@ export default function PublicCollection() {
                 <span className="text-white/60 text-sm">I give <strong className="text-white/80">{col.business_name}</strong> permission to use this testimonial on its website and marketing materials.</span>
               </label>
 
-              {RECAPTCHA_KEY && (
-                <div className="flex justify-center"><ReCAPTCHA sitekey={RECAPTCHA_KEY} theme="dark" onChange={setCaptcha} /></div>
+              {recaptchaKey && (
+                <div className="flex justify-center"><ReCAPTCHA sitekey={recaptchaKey} theme="dark" onChange={setCaptcha} /></div>
               )}
 
               <input type="text" tabIndex={-1} autoComplete="off" value={form.honeypot} onChange={(e) => set("honeypot", e.target.value)} className="hidden" aria-hidden />

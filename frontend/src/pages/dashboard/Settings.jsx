@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Save, Upload, Loader2, Sun, Moon, Crown } from "lucide-react";
 import { toast } from "sonner";
+import AdminIntegrations from "@/components/dashboard/AdminIntegrations";
 
 function Card({ title, desc, children }) {
   return (
@@ -88,6 +89,8 @@ export default function Settings() {
             <Button variant="outline" size="sm" onClick={() => toast.info("Billing management coming soon")} data-testid="manage-plan">Upgrade</Button>
           </div>
         </Card>
+
+        {user?.is_admin && <AdminIntegrations />}
       </div>
     </div>
   );

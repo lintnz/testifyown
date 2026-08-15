@@ -1,25 +1,22 @@
 import os
 import asyncio
 import logging
+from settings_store import get_settings
 
 logger = logging.getLogger(__name__)
 
-SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "onboarding@resend.dev")
-
-
-def _api_key():
-    return (os.environ.get("RESEND_API_KEY") or "").strip()
-
 
 async def send_email(to: str, subject: str, html: str):
-    key = _api_key()
+    s = await get_settings()
+    key = (s.get("resend_api_key") or "").strip()
+    sender = (s.get("sender_email") or "onboarding@resend.dev").strip()
     if not key:
         logger.info(f"[EMAIL:MOCK] To={to} Subject={subject}")
         return {"status": "mock", "message": "Email logging only (no RESEND_API_KEY configured)"}
     try:
         import resend
         resend.api_key = key
-        params = {"from": SENDER_EMAIL, "to": [to], "subject": subject, "html": html}
+        params = {"from": sender, "to": [to], "subject": subject, "html": html}
         result = await asyncio.to_thread(resend.Emails.send, params)
         return {"status": "success", "email_id": result.get("id")}
     except Exception as e:
