@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Outlet, NavLink, useNavigate } from "react-router-dom";
+import { Outlet, NavLink, useNavigate, Navigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useTheme } from "@/context/ThemeContext";
 import Logo from "@/components/Logo";
@@ -25,6 +25,8 @@ export default function DashboardLayout() {
   const [open, setOpen] = useState(false);
 
   const handleLogout = async () => { await logout(); navigate("/login"); };
+
+  if (user && user.onboarded === false) return <Navigate to="/onboarding" replace />;
 
   const SidebarContent = () => (
     <>

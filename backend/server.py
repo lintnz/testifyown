@@ -29,6 +29,16 @@ from email_service import (
 )
 from captcha import verify_recaptcha
 from settings_store import get_settings, get_setting, update_settings
+import stripe
+
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY") or "sk_test_emergent"
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+
+PLAN_BY_LOOKUP = {"pro_monthly": "pro", "business_monthly": "business"}
+
+
+def _is_unlimited(plan):
+    return plan in ("pro", "business")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("testify")
@@ -70,6 +80,7 @@ def public_user(u: dict) -> dict:
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@testify.com")
     base = {k: u.get(k) for k in ["id", "name", "email", "avatar", "role", "auth_provider", "created_at"]}
     base["is_admin"] = u.get("email") == admin_email
+    base["onboarded"] = u.get("onboarded", False)
     return base
 
 
@@ -278,7 +289,7 @@ async def onboarding(data: m.OnboardingInput, request: Request):
         "logo_url": data.logo_url,
         "published": True,
     })
-    await db.collections.insert_one(col)
+    await _insert_collection_safe(col)
     await db.users.update_one({"id": user["id"]}, {"$set": {"onboarded": True}})
     col.pop("_id", None)
     return {"workspace": await db.workspaces.find_one({"id": ws["id"]}, {"_id": 0}), "collection": col}
@@ -298,6 +309,17 @@ def _new_collection_doc(workspace_id: str, data: dict) -> dict:
     return base
 
 
+async def _insert_collection_safe(col: dict):
+    from pymongo.errors import DuplicateKeyError
+    for _ in range(6):
+        try:
+            await db.collections.insert_one(col)
+            return col
+        except DuplicateKeyError:
+            col["slug"] = f"{slugify(col.get('name', 'page'))}-{uuid.uuid4().hex[:5]}"
+    raise HTTPException(status_code=500, detail="Could not create collection")
+
+
 @api.get("/collections")
 async def list_collections(request: Request):
     user = await authlib.get_current_user(request)
@@ -312,11 +334,14 @@ async def list_collections(request: Request):
 async def create_collection(data: m.CollectionInput, request: Request):
     user = await authlib.get_current_user(request)
     ws = await authlib.get_user_workspace(user)
+    if not _is_unlimited(ws.get("plan", "free")):
+        if await db.collections.count_documents({"workspace_id": ws["id"]}) >= 1:
+            raise HTTPException(status_code=402, detail="Free plan allows 1 collection page. Upgrade to Pro for unlimited.")
     slug = await unique_slug(db.collections, data.slug or data.name)
     doc = data.model_dump()
     doc["slug"] = slug
     col = _new_collection_doc(ws["id"], doc)
-    await db.collections.insert_one(col)
+    await _insert_collection_safe(col)
     col.pop("_id", None)
     return col
 
@@ -614,6 +639,9 @@ async def list_widgets(request: Request):
 async def create_widget(data: m.WidgetInput, request: Request):
     user = await authlib.get_current_user(request)
     ws = await authlib.get_user_workspace(user)
+    if not _is_unlimited(ws.get("plan", "free")):
+        if await db.widgets.count_documents({"workspace_id": ws["id"]}) >= 1:
+            raise HTTPException(status_code=402, detail="Free plan allows 1 widget. Upgrade to Pro for unlimited widgets.")
     config = {**DEFAULT_WIDGET_CONFIG, **(data.configuration or {})}
     widget = {
         "id": m.gen_id("wid_"),
@@ -851,6 +879,9 @@ async def submit_testimonial(slug: str, data: m.TestimonialSubmit, request: Requ
     if col.get("require_role") and not (data.role or "").strip():
         raise HTTPException(status_code=400, detail="Job title is required")
     ws = await db.workspaces.find_one({"id": col["workspace_id"]}, {"_id": 0})
+    if not _is_unlimited(ws.get("plan", "free")):
+        if await db.testimonials.count_documents({"workspace_id": ws["id"]}) >= 20:
+            raise HTTPException(status_code=402, detail="This business has reached its testimonial limit. Please try again later.")
     doc = {
         "id": m.gen_id("tst_"),
         "workspace_id": ws["id"],
@@ -924,6 +955,7 @@ async def public_wall(ws_slug: str):
         "collect_slug": col["slug"] if col else None,
         "testimonials": [_public_testimonial(t) for t in items],
         "count": len(items),
+        "branding": ws.get("plan", "free") == "free",
     }
 
 
@@ -949,6 +981,7 @@ async def public_widget(wid: str, request: Request):
     return {
         "id": w["id"], "name": w["name"], "type": w["type"], "configuration": cfg,
         "business_name": ws.get("name") if ws else "",
+        "branding": (ws.get("plan", "free") if ws else "free") == "free",
         "testimonials": [_public_testimonial(t) for t in items],
     }
 
@@ -975,6 +1008,110 @@ async def widget_js():
 })();"""
     return PlainTextResponse(js, media_type="application/javascript",
                              headers={"Cache-Control": "public, max-age=300"})
+
+
+# ---------- Payments (Stripe subscriptions) ----------
+@api.get("/plans")
+async def list_plans():
+    return [
+        {"id": "free", "name": "Free", "price": 0, "lookup_key": None,
+         "features": ["1 collection page", "Up to 20 testimonials", "1 basic widget", "Testify branding"]},
+        {"id": "pro", "name": "Pro", "price": 29, "lookup_key": "pro_monthly",
+         "features": ["Unlimited collection pages", "Unlimited testimonials", "Video testimonials", "Unlimited widgets", "Custom branding", "Analytics", "Remove Testify branding"]},
+        {"id": "business", "name": "Business", "price": 79, "lookup_key": "business_monthly",
+         "features": ["Everything in Pro", "Team members", "Advanced analytics", "Custom domain", "Priority support", "Advanced customization"]},
+    ]
+
+
+@api.post("/payments/checkout")
+async def create_checkout(data: m.CheckoutInput, request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    if data.lookup_key not in PLAN_BY_LOOKUP:
+        raise HTTPException(status_code=400, detail="Invalid plan")
+    prices = stripe.Price.list(lookup_keys=[data.lookup_key], active=True, limit=1).data
+    if not prices:
+        raise HTTPException(status_code=500, detail="Plan price not configured")
+    price = prices[0]
+    origin = data.origin_url.rstrip("/")
+    kwargs = dict(
+        line_items=[{"price": price.id, "quantity": 1}],
+        mode="subscription",
+        success_url=f"{origin}/payment/success?session_id={{CHECKOUT_SESSION_ID}}",
+        cancel_url=f"{origin}/payment/cancel",
+        metadata={"user_id": user["id"], "workspace_id": ws["id"], "lookup_key": data.lookup_key},
+    )
+    try:
+        session = stripe.checkout.Session.create(**kwargs, managed_payments={"enabled": True})
+    except stripe.error.InvalidRequestError as e:
+        msg = (getattr(e, "user_message", "") or str(e)).lower()
+        if "managed payments" in msg or "ineligible" in msg:
+            session = stripe.checkout.Session.create(**kwargs, automatic_tax={"enabled": True}, billing_address_collection="required")
+        else:
+            raise HTTPException(status_code=500, detail="Could not start checkout")
+    await db.payment_transactions.insert_one({
+        "session_id": session.id, "user_id": user["id"], "workspace_id": ws["id"],
+        "lookup_key": data.lookup_key, "plan": PLAN_BY_LOOKUP[data.lookup_key],
+        "amount": (price.unit_amount or 0), "currency": price.currency,
+        "status": "initiated", "payment_status": "pending",
+        "created_at": m.now_iso(), "updated_at": m.now_iso(),
+    })
+    return {"checkout_url": session.url, "session_id": session.id}
+
+
+async def _apply_paid(session_id: str):
+    rec = await db.payment_transactions.find_one({"session_id": session_id})
+    if rec and rec.get("workspace_id") and rec.get("plan"):
+        await db.workspaces.update_one({"id": rec["workspace_id"]}, {"$set": {"plan": rec["plan"], "updated_at": m.now_iso()}})
+
+
+@api.get("/payments/status/{session_id}")
+async def payment_status(session_id: str):
+    rec = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+    if not rec:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    if rec.get("payment_status") != "paid":
+        try:
+            s = stripe.checkout.Session.retrieve(session_id)
+            if s.payment_status == "paid" or s.status == "complete":
+                res = await db.payment_transactions.update_one(
+                    {"session_id": session_id, "payment_status": {"$ne": "paid"}},
+                    {"$set": {"status": "completed", "payment_status": "paid",
+                              "stripe_subscription_id": s.subscription,
+                              "updated_at": m.now_iso()}},
+                )
+                if res.modified_count:
+                    await _apply_paid(session_id)
+                rec = await db.payment_transactions.find_one({"session_id": session_id}, {"_id": 0})
+        except stripe.error.StripeError:
+            pass
+    return {"session_id": rec["session_id"], "status": rec["status"],
+            "payment_status": rec["payment_status"], "plan": rec.get("plan")}
+
+
+@api.post("/stripe/webhook")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    try:
+        event = stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    obj, t = event["data"]["object"], event["type"]
+    if t == "checkout.session.completed":
+        res = await db.payment_transactions.update_one(
+            {"session_id": obj["id"], "payment_status": {"$ne": "paid"}},
+            {"$set": {"status": "completed", "payment_status": obj.get("payment_status", "paid"),
+                      "stripe_subscription_id": obj.get("subscription"), "updated_at": m.now_iso()}},
+        )
+        if res.modified_count:
+            await _apply_paid(obj["id"])
+    elif t == "customer.subscription.deleted":
+        sub_id = obj.get("id")
+        rec = await db.payment_transactions.find_one({"stripe_subscription_id": sub_id})
+        if rec and rec.get("workspace_id"):
+            await db.workspaces.update_one({"id": rec["workspace_id"]}, {"$set": {"plan": "free", "updated_at": m.now_iso()}})
+    return {"status": "ok"}
 
 
 app.include_router(api)

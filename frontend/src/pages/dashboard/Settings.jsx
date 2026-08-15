@@ -12,6 +12,7 @@ import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Save, Upload, Loader2, Sun, Moon, Crown } from "lucide-react";
 import { toast } from "sonner";
 import AdminIntegrations from "@/components/dashboard/AdminIntegrations";
+import Billing from "@/components/dashboard/Billing";
 
 function Card({ title, desc, children }) {
   return (
@@ -83,12 +84,7 @@ export default function Settings() {
           </div>
         </Card>
 
-        <Card title="Plan" desc="Your current subscription.">
-          <div className="flex items-center justify-between p-4 rounded-xl bg-secondary/50">
-            <div className="flex items-center gap-3"><div className="w-10 h-10 rounded-xl bg-primary/15 flex items-center justify-center"><Crown size={18} className="text-primary" /></div><div><div className="font-medium capitalize">{ws.plan || "free"} plan</div><div className="text-xs text-muted-foreground">Manage billing and upgrades</div></div></div>
-            <Button variant="outline" size="sm" onClick={() => toast.info("Billing management coming soon")} data-testid="manage-plan">Upgrade</Button>
-          </div>
-        </Card>
+        <Billing currentPlan={ws.plan || "free"} />
 
         {user?.is_admin && <AdminIntegrations />}
       </div>

@@ -41,6 +41,11 @@ export default function WidgetEmbed() {
   return (
     <div ref={ref} style={{ background: bg, padding: 4 }} className="font-body">
       <TestimonialWidget widget={widget} testimonials={widget.testimonials} />
+      {widget.branding && (
+        <div style={{ textAlign: "center", padding: "10px 0 2px", fontSize: 11, opacity: 0.5, color: isDark ? "#fff" : "#000" }}>
+          Powered by <a href={window.location.origin} target="_blank" rel="noreferrer" style={{ color: "inherit", fontWeight: 600 }}>Testify</a>
+        </div>
+      )}
     </div>
   );
 }

@@ -24,6 +24,8 @@ import Settings from "@/pages/dashboard/Settings";
 import PublicCollection from "@/pages/PublicCollection";
 import WidgetEmbed from "@/pages/WidgetEmbed";
 import WallOfLove from "@/pages/WallOfLove";
+import PaymentSuccess from "@/pages/PaymentSuccess";
+import PaymentCancel from "@/pages/PaymentCancel";
 
 function LoadingScreen() {
   return (
@@ -94,6 +96,8 @@ function AppRouter() {
       <Route path="/t/:slug" element={<PublicCollection />} />
       <Route path="/wall/:slug" element={<WallOfLove />} />
       <Route path="/embed/:id" element={<WidgetEmbed />} />
+      <Route path="/payment/success" element={<ProtectedRoute><PaymentSuccess /></ProtectedRoute>} />
+      <Route path="/payment/cancel" element={<PaymentCancel />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

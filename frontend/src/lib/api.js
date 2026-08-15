@@ -18,8 +18,7 @@ export function mediaUrl(path) {
   return path;
 }
 
-export function formatApiError(err) {
-  const detail = err?.response?.data?.detail;
+export function formatApiError(err) {  const detail = err?.response?.data?.detail;
   if (detail == null) return err?.message || "Something went wrong. Please try again.";
   if (typeof detail === "string") return detail;
   if (Array.isArray(detail))

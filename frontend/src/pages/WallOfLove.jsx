@@ -72,7 +72,7 @@ export default function WallOfLove() {
           />
         )}
 
-        <footer className="text-center mt-20 text-white/25 text-xs">Powered by Testify</footer>
+        <footer className="text-center mt-20 text-white/25 text-xs">{data.branding ? "Powered by Testify" : `© ${new Date().getFullYear()} ${data.business_name}`}</footer>
       </div>
     </div>
   );

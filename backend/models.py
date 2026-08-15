@@ -183,3 +183,8 @@ class SettingsInput(BaseModel):
     resend_api_key: Optional[str] = None
     sender_email: Optional[str] = None
     google_places_api_key: Optional[str] = None
+
+
+class CheckoutInput(BaseModel):
+    lookup_key: str
+    origin_url: str
