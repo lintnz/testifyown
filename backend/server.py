@@ -444,6 +444,44 @@ async def list_tags(request: Request):
     return tags
 
 
+@api.post("/testimonials/import")
+async def import_testimonial(data: m.ManualImportInput, request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    doc = {
+        "id": m.gen_id("tst_"),
+        "workspace_id": ws["id"],
+        "collection_id": None,
+        "first_name": data.first_name.strip(),
+        "last_name": (data.last_name or "").strip(),
+        "email": "",
+        "company": (data.company or "").strip(),
+        "role": (data.role or "").strip(),
+        "website": "",
+        "avatar_url": data.avatar_url,
+        "text": (data.text or "").strip(),
+        "video_url": None,
+        "video_thumbnail_url": None,
+        "rating": data.rating,
+        "status": "approved",
+        "featured": data.featured,
+        "consent": True,
+        "consent_text": "Imported by workspace owner.",
+        "consent_at": m.now_iso(),
+        "custom_answers": {},
+        "tags": ["Imported"],
+        "notes": "",
+        "source": data.source or "Imported",
+        "submitted_at": m.now_iso(),
+        "approved_at": m.now_iso(),
+        "created_at": m.now_iso(),
+        "updated_at": m.now_iso(),
+    }
+    await db.testimonials.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
 # ---------- Widgets ----------
 DEFAULT_WIDGET_CONFIG = {
     "source": "approved",  # approved | featured | tag
@@ -762,6 +800,27 @@ def _public_testimonial(t: dict) -> dict:
         "text": t.get("text"), "video_url": t.get("video_url"),
         "video_thumbnail_url": t.get("video_thumbnail_url"), "rating": t.get("rating"),
         "featured": t.get("featured"),
+    }
+
+
+@api.get("/public/wall/{ws_slug}")
+async def public_wall(ws_slug: str):
+    ws = await db.workspaces.find_one({"slug": ws_slug}, {"_id": 0})
+    if not ws:
+        raise HTTPException(status_code=404, detail="Wall not found")
+    items = await db.testimonials.find(
+        {"workspace_id": ws["id"], "status": "approved"}, {"_id": 0}
+    ).sort("approved_at", -1).to_list(200)
+    # find a published collection slug to link the collect CTA
+    col = await db.collections.find_one({"workspace_id": ws["id"], "published": True}, {"_id": 0, "slug": 1})
+    return {
+        "business_name": ws.get("name"),
+        "logo_url": ws.get("logo_url"),
+        "primary_color": ws.get("primary_color", "#ff5722"),
+        "slug": ws.get("slug"),
+        "collect_slug": col["slug"] if col else None,
+        "testimonials": [_public_testimonial(t) for t in items],
+        "count": len(items),
     }
 
 

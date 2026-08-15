@@ -159,3 +159,15 @@ class AnalyticsEventInput(BaseModel):
     widget_id: Optional[str] = None
     collection_id: Optional[str] = None
     metadata: Dict[str, Any] = {}
+
+
+class ManualImportInput(BaseModel):
+    first_name: str
+    last_name: Optional[str] = ""
+    company: Optional[str] = ""
+    role: Optional[str] = ""
+    avatar_url: Optional[str] = None
+    text: str
+    rating: Optional[int] = None
+    source: Optional[str] = "Imported"
+    featured: bool = False

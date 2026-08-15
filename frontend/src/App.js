@@ -23,6 +23,7 @@ import Analytics from "@/pages/dashboard/Analytics";
 import Settings from "@/pages/dashboard/Settings";
 import PublicCollection from "@/pages/PublicCollection";
 import WidgetEmbed from "@/pages/WidgetEmbed";
+import WallOfLove from "@/pages/WallOfLove";
 
 function LoadingScreen() {
   return (
@@ -91,6 +92,7 @@ function AppRouter() {
         <Route path="settings" element={<Settings />} />
       </Route>
       <Route path="/t/:slug" element={<PublicCollection />} />
+      <Route path="/wall/:slug" element={<WallOfLove />} />
       <Route path="/embed/:id" element={<WidgetEmbed />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

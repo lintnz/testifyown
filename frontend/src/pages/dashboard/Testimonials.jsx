@@ -9,8 +9,9 @@ import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { MessageSquareQuote, Search, Star, Video, Check, X, Archive, Trash2, MoreVertical, Play } from "lucide-react";
+import { MessageSquareQuote, Search, Star, Video, Check, X, Archive, Trash2, MoreVertical, Play, DownloadCloud, Heart } from "lucide-react";
 import { toast } from "sonner";
+import ImportReviewDialog from "@/components/dashboard/ImportReviewDialog";
 
 const TABS = [["all", "All"], ["pending", "Pending"], ["approved", "Approved"], ["rejected", "Rejected"], ["archived", "Archived"]];
 
@@ -20,6 +21,9 @@ export default function Testimonials() {
   const [tab, setTab] = useState("all");
   const [search, setSearch] = useState("");
   const [type, setType] = useState("all");
+  const [importOpen, setImportOpen] = useState(false);
+
+  const { data: ws } = useQuery({ queryKey: ["workspace"], queryFn: async () => (await api.get("/workspace")).data });
 
   const params = {};
   if (tab !== "all") params.status = tab;
@@ -50,7 +54,16 @@ export default function Testimonials() {
 
   return (
     <div>
-      <PageHeader title="Testimonials" subtitle="Approve, feature, tag, and manage every testimonial you collect." />
+      <PageHeader title="Testimonials" subtitle="Approve, feature, tag, and manage every testimonial you collect.">
+        {ws?.slug && (
+          <Button variant="outline" className="gap-1.5" onClick={() => window.open(`${window.location.origin}/wall/${ws.slug}`, "_blank")} data-testid="wall-of-love-btn">
+            <Heart size={16} /> Wall of Love
+          </Button>
+        )}
+        <Button className="gap-1.5" onClick={() => setImportOpen(true)} data-testid="import-review-btn">
+          <DownloadCloud size={16} /> Import review
+        </Button>
+      </PageHeader>
 
       <div className="flex flex-col sm:flex-row gap-3 mb-6">
         <div className="relative flex-1">
@@ -131,6 +144,7 @@ export default function Testimonials() {
           ))}
         </div>
       )}
+      <ImportReviewDialog open={importOpen} onClose={() => setImportOpen(false)} />
     </div>
   );
 }
