@@ -1,0 +1,162 @@
+{
+  "brand_name": "Testify",
+  "theme_preference": "dark_mode_first",
+  "typography": {
+    "fonts_to_install": ["@fontsource/outfit", "@fontsource/manrope"],
+    "headings": {
+      "font_family": "Outfit, sans-serif",
+      "strategy": "The Anti-Default Rule: Never use Inter for headings. Use fluid typography with tight tracking (tracking-tighter) for large headings.",
+      "scales": {
+        "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tighter leading-none font-bold",
+        "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight leading-tight",
+        "h3": "text-xl sm:text-2xl font-semibold",
+        "h4": "text-lg sm:text-xl font-medium",
+        "overline": "text-xs uppercase tracking-[0.2em] font-bold"
+      }
+    },
+    "body": {
+      "font_family": "Manrope, sans-serif",
+      "strategy": "Geometric Sans for legibility and modern SaaS feel.",
+      "scales": {
+        "base": "text-base leading-relaxed",
+        "small": "text-sm text-muted-foreground"
+      }
+    },
+    "banned_fonts": ["Inter", "Roboto", "Open Sans", "Lato", "Space Grotesk"]
+  },
+  "colors": {
+    "archetype": "The Performance Pro (Modern SaaS / Linear-esque)",
+    "strategy": "Deep Obsidian background with high-contrast text. Accent colors used strictly for action (Electric Blaze/Amber) to give a human, energetic touch to the testimonial product.",
+    "banned_colors": ["#7351B7", "teal green", "teal blue", "#1B93A4"],
+    "css_variables_update": {
+      "dark": {
+        "--background": "0 0% 4%",
+        "--foreground": "0 0% 98%",
+        "--card": "0 0% 6%",
+        "--card-foreground": "0 0% 98%",
+        "--popover": "0 0% 6%",
+        "--popover-foreground": "0 0% 98%",
+        "--primary": "12 100% 59%", 
+        "--primary-foreground": "0 0% 100%",
+        "--secondary": "0 0% 12%",
+        "--secondary-foreground": "0 0% 98%",
+        "--muted": "0 0% 12%",
+        "--muted-foreground": "0 0% 60%",
+        "--border": "0 0% 15%",
+        "--input": "0 0% 15%",
+        "--ring": "12 100% 59%"
+      },
+      "light": {
+        "--background": "0 0% 98%",
+        "--foreground": "0 0% 4%",
+        "--card": "0 0% 100%",
+        "--card-foreground": "0 0% 4%",
+        "--popover": "0 0% 100%",
+        "--popover-foreground": "0 0% 4%",
+        "--primary": "12 100% 59%", 
+        "--primary-foreground": "0 0% 100%",
+        "--secondary": "0 0% 92%",
+        "--secondary-foreground": "0 0% 9%",
+        "--muted": "0 0% 92%",
+        "--muted-foreground": "0 0% 40%",
+        "--border": "0 0% 88%",
+        "--input": "0 0% 88%",
+        "--ring": "12 100% 59%"
+      }
+    }
+  },
+  "surfaces_and_micro_themes": {
+    "glassmorphism": {
+      "usage": ["Sticky Headers", "Floating Navs", "Public Testimonial Submission Form (Centered Card)"],
+      "implementation": "bg-black/60 backdrop-blur-xl border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.12)] (Dark Mode). Ensure text has high contrast. NEVER use pure transparent background."
+    },
+    "grid_borders": {
+      "usage": ["Dashboard Data Tables", "Features Grid", "Analytics Section"],
+      "implementation": "border-collapse layout with 1px subtle borders (border-border/40). Flat, cardless appearance."
+    },
+    "tracing_beam": {
+      "usage": ["Premium Pricing Tier", "Featured Testimonial Widget Highlight"],
+      "implementation": "Animated gradient border that traces the edge using Framer Motion or CSS mask-image."
+    }
+  },
+  "grids_and_layouts": {
+    "marketing_pages": {
+      "strategy": "The Bento/Tetris Grid Protocol. High visual tension, asymmetrical.",
+      "implementation": "grid-cols-1 md:grid-cols-12 gap-8. Mix spans (e.g., col-span-8 row-span-2 for hero widget preview, col-span-4 for supporting text). Use generous padding (p-12 to p-24) for sections."
+    },
+    "dashboard_admin": {
+      "strategy": "High Density Grid. Information clarity over decoration.",
+      "implementation": "grid-cols-1 md:grid-cols-4 gap-4 or gap-6. Compact spacing. Left-aligned task-oriented interfaces."
+    },
+    "spacing_scale": "Use 2-3x more spacing. Containers with borders MUST have internal padding (p-6 or p-8) to prevent collision."
+  },
+  "component_strategies": {
+    "marketing_ui": "Use raw HTML/Tailwind for unique layouts. Do not use standard Shadcn cards here to avoid the generic SaaS look.",
+    "dashboard_ui": "Use Shadcn components heavily customized (flat, 1px border, dense). No heavy shadows in dark mode.",
+    "testimonial_widgets": {
+      "masonry_wall": "Columns using CSS column-count or responsive grid for 'Wall of Love'.",
+      "marquee": "Infinite horizontal scroll (react-fast-marquee) for displaying dense client feedback.",
+      "cards": "Include verified badge, avatar, name, handle, company logo, and specific metrics in the quote."
+    },
+    "data_visualization": "Use Shadcn/Recharts for analytics (views, conversion). Minimalist, monochromatic with primary accent.",
+    "icons": "Use lucide-react (already installed). Phosphor Icons recommended for dense dashboards if installing another.",
+    "forms": "Public submission form must be mobile-first. Huge record button, floating glassmorphism card over a dark gradient or abstract background."
+  },
+  "motion": {
+    "rules": [
+      "No universal transitions (transition-all banned).",
+      "Staggered entrance for list items/widgets using framer-motion.",
+      "Hover states must be explicitly defined for text (hover:text-white).",
+      "Subtle scaling on interactive elements (active:scale-95)."
+    ]
+  },
+  "image_urls": {
+    "avatars": [
+      {
+        "url": "https://images.unsplash.com/photo-1680444602159-cd8b9abe4698?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTV8MHwxfHNlYXJjaHwxfHxzbWlsaW5nJTIwZmFjZSUyMHBvcnRyYWl0fGVufDB8fHx8MTc4Njc4NTY5Mnww&ixlib=rb-4.1.0&q=85",
+        "description": "Woman with blue eyes - Use for Customer Testimonial Widget 1"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1567516364473-233c4b6fcfbe?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTV8MHwxfHNlYXJjaHw0fHxzbWlsaW5nJTIwZmFjZSUyMHBvcnRyYWl0fGVufDB8fHx8MTc4Njc4NTY5Mnww&ixlib=rb-4.1.0&q=85",
+        "description": "Woman smiling - Use for Customer Testimonial Widget 2"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1623717217554-72ca676de535?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2OTV8MHwxfHNlYXJjaHwzfHxzbWlsaW5nJTIwZmFjZSUyMHBvcnRyYWl0fGVufDB8fHx8MTc4Njc4NTY5Mnww&ixlib=rb-4.1.0&q=85",
+        "description": "Smiling woman in red shirt - Use for Customer Testimonial Widget 3"
+      }
+    ],
+    "video_testimonials": [
+      {
+        "url": "https://images.unsplash.com/photo-1764162051229-7659f627b72e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAxODF8MHwxfHNlYXJjaHw0fHx2aWRlbyUyMHJlY29yZGluZyUyMHBvcnRyYWl0JTIwc21hcnRwaG9uZXxlbnwwfHx8fDE3ODY3ODU2OTJ8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Smartphone broadcasting live - Use for hero section 'Video Submission' feature highlight."
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1649432497652-0c4ac57acf0c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAxODF8MHwxfHNlYXJjaHwxfHx2aWRlbyUyMHJlY29yZGluZyUyMHBvcnRyYWl0JTIwc21hcnRwaG9uZXxlbnwwfHx8fDE3ODY3ODU2OTJ8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Person holding phone with video - Use for the public mobile-first submission page placeholder."
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "CRITICAL: Read this JSON file completely before starting.",
+    "CRITICAL: DO NOT use complete transparent backgrounds for nav/headers. Use backdrop-blur and semi-transparent colors.",
+    "Do not center align paragraphs or app layout (.App). Left align dense content and forms.",
+    "Use data-testid attributes for ALL interactive elements (e.g., data-testid='submit-testimonial-btn').",
+    "Install required dependencies: framer-motion, react-fast-marquee, lucide-react, sonner.",
+    "Implement Sonner for toast notifications (e.g., 'Testimonial Approved').",
+    "Create a toggle for Dark/Light mode in the dashboard setting, but default to Dark Mode for the landing page.",
+    "For the Widget Builder, create a Live Preview pane that takes up 60% of the screen, and controls on the left sidebar (40%).",
+    "Empty States should not be blank - add onboarding steps like 'Share your first collection link'."
+  ],
+  "universal_guidelines_for_main_agent": [
+    "You tend to converge toward generic, 'on distribution' outputs. Avoid the 'AI slop' aesthetic.",
+    "Dark colors look good when used independently without gradients. DO NOT use dark colors as gradients.",
+    "Don't make generic centered layouts, simplistic gradients, and uniform styling.",
+    "Create depth through layered design elements with z-index hierarchy.",
+    "Use glass-morphism effects with backdrop filters (12-24px blur).",
+    "NEVER use universal transitions (transition: all).",
+    "NEVER use AI assistant Emoji characters (🤖🧠💭) for icons.",
+    "Every interaction needs micro-animations - hover states, transitions, entrance animations. Static = dead.",
+    "Use 2-3x more spacing than feels comfortable. Cramped designs look cheap.",
+    "Use the exact provided image URLs. NEVER use placeholder text/URLs."
+  ]
+}

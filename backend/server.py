@@ -1,0 +1,846 @@
+import os
+import re
+import time
+import uuid
+import logging
+import secrets
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from collections import defaultdict
+
+from dotenv import load_dotenv
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / ".env")
+
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Depends, UploadFile, File, Response
+from fastapi.responses import PlainTextResponse
+from starlette.middleware.cors import CORSMiddleware
+
+from db import db, ensure_indexes
+import models as m
+import auth as authlib
+from storage import init_storage, put_object, get_object, APP_NAME
+from email_service import (
+    send_email,
+    new_testimonial_email,
+    welcome_submission_email,
+    password_reset_email,
+)
+from captcha import verify_recaptcha
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("testify")
+
+app = FastAPI()
+api = APIRouter(prefix="/api")
+
+# ---------- helpers ----------
+_rate_store = defaultdict(list)
+
+
+def rate_limit(key: str, max_calls: int, window: int):
+    now = time.time()
+    _rate_store[key] = [t for t in _rate_store[key] if now - t < window]
+    if len(_rate_store[key]) >= max_calls:
+        raise HTTPException(status_code=429, detail="Too many requests. Please slow down.")
+    _rate_store[key].append(now)
+
+
+def slugify(text: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return s or uuid.uuid4().hex[:8]
+
+
+async def unique_slug(collection, base: str, exclude_id=None) -> str:
+    slug = slugify(base)
+    candidate = slug
+    i = 1
+    while True:
+        q = {"slug": candidate}
+        existing = await collection.find_one(q, {"_id": 0, "id": 1})
+        if not existing or existing.get("id") == exclude_id:
+            return candidate
+        i += 1
+        candidate = f"{slug}-{i}"
+
+
+def public_user(u: dict) -> dict:
+    return {k: u.get(k) for k in ["id", "name", "email", "avatar", "role", "auth_provider", "created_at"]}
+
+
+# ---------- Auth ----------
+@api.post("/auth/register")
+async def register(data: m.RegisterInput):
+    email = data.email.lower()
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="An account with this email already exists")
+    uid = m.gen_id("user_")
+    user = {
+        "id": uid,
+        "name": data.name,
+        "email": email,
+        "password_hash": authlib.hash_password(data.password),
+        "avatar": None,
+        "auth_provider": "email",
+        "role": "owner",
+        "email_verified": False,
+        "onboarded": False,
+        "created_at": m.now_iso(),
+        "updated_at": m.now_iso(),
+    }
+    await db.users.insert_one(user)
+    await _create_default_workspace(uid, data.name)
+    token = authlib.create_access_token(uid, email)
+    return {"token": token, "user": public_user(user)}
+
+
+@api.post("/auth/login")
+async def login(data: m.LoginInput, request: Request):
+    email = data.email.lower()
+    ident = f"{request.client.host}:{email}"
+    await authlib.check_lockout(ident)
+    user = await db.users.find_one({"email": email})
+    if not user or not user.get("password_hash") or not authlib.verify_password(data.password, user["password_hash"]):
+        await authlib.record_failed_login(ident)
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    await authlib.clear_login_attempts(ident)
+    token = authlib.create_access_token(user["id"], email)
+    return {"token": token, "user": public_user(user)}
+
+
+@api.post("/auth/google")
+async def google_auth(data: m.GoogleSessionInput):
+    info = authlib.exchange_google_session(data.session_id)
+    email = info["email"].lower()
+    user = await db.users.find_one({"email": email})
+    if not user:
+        uid = m.gen_id("user_")
+        user = {
+            "id": uid,
+            "name": info.get("name", email.split("@")[0]),
+            "email": email,
+            "password_hash": None,
+            "avatar": info.get("picture"),
+            "auth_provider": "google",
+            "role": "owner",
+            "email_verified": True,
+            "onboarded": False,
+            "created_at": m.now_iso(),
+            "updated_at": m.now_iso(),
+        }
+        await db.users.insert_one(user)
+        await _create_default_workspace(uid, user["name"])
+    else:
+        await db.users.update_one({"id": user["id"]}, {"$set": {"avatar": info.get("picture") or user.get("avatar")}})
+    token = authlib.create_access_token(user["id"], email)
+    return {"token": token, "user": public_user(user)}
+
+
+@api.post("/auth/logout")
+async def logout():
+    return {"ok": True}
+
+
+@api.get("/auth/me")
+async def me(request: Request):
+    user = await authlib.get_current_user(request)
+    return public_user(user) | {"onboarded": user.get("onboarded", False)}
+
+
+@api.put("/auth/profile")
+async def update_profile(data: m.ProfileUpdate, request: Request):
+    user = await authlib.get_current_user(request)
+    upd = {k: v for k, v in data.model_dump(exclude_none=True).items()}
+    upd["updated_at"] = m.now_iso()
+    await db.users.update_one({"id": user["id"]}, {"$set": upd})
+    fresh = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    return public_user(fresh)
+
+
+@api.post("/auth/forgot-password")
+async def forgot_password(data: m.ForgotPasswordInput):
+    user = await db.users.find_one({"email": data.email.lower()})
+    if user:
+        token = secrets.token_urlsafe(32)
+        await db.password_reset_tokens.insert_one({
+            "token": token,
+            "user_id": user["id"],
+            "used": False,
+            "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
+        })
+        reset_url = f"{os.environ.get('CORS_ORIGINS','').split(',')[0]}/reset-password?token={token}"
+        await send_email(user["email"], "Reset your Testify password", password_reset_email(reset_url))
+        logger.info(f"Password reset link for {user['email']}: /reset-password?token={token}")
+    return {"ok": True, "message": "If an account exists, a reset link has been sent."}
+
+
+@api.post("/auth/reset-password")
+async def reset_password(data: m.ResetPasswordInput):
+    rec = await db.password_reset_tokens.find_one({"token": data.token})
+    if not rec or rec.get("used"):
+        raise HTTPException(status_code=400, detail="Invalid or expired reset link")
+    exp = rec["expires_at"]
+    if isinstance(exp, str):
+        exp = datetime.fromisoformat(exp)
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp < datetime.now(timezone.utc):
+        raise HTTPException(status_code=400, detail="Reset link has expired")
+    await db.users.update_one({"id": rec["user_id"]}, {"$set": {"password_hash": authlib.hash_password(data.password)}})
+    await db.password_reset_tokens.update_one({"token": data.token}, {"$set": {"used": True}})
+    return {"ok": True}
+
+
+# ---------- Workspace ----------
+async def _create_default_workspace(user_id: str, name: str):
+    slug = await unique_slug(db.workspaces, name)
+    ws = {
+        "id": m.gen_id("ws_"),
+        "owner_id": user_id,
+        "name": name,
+        "slug": slug,
+        "logo_url": None,
+        "primary_color": "#ff5722",
+        "secondary_color": "#151515",
+        "button_color": "#ff5722",
+        "plan": "free",
+        "created_at": m.now_iso(),
+        "updated_at": m.now_iso(),
+    }
+    await db.workspaces.insert_one(ws)
+    await db.workspace_members.insert_one({
+        "id": m.gen_id("wm_"),
+        "workspace_id": ws["id"],
+        "user_id": user_id,
+        "role": "owner",
+        "created_at": m.now_iso(),
+    })
+    return ws
+
+
+@api.get("/workspace")
+async def get_workspace(request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    return ws
+
+
+@api.put("/workspace")
+async def update_workspace(data: m.WorkspaceUpdate, request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    upd = {k: v for k, v in data.model_dump(exclude_none=True).items()}
+    upd["updated_at"] = m.now_iso()
+    await db.workspaces.update_one({"id": ws["id"]}, {"$set": upd})
+    return await db.workspaces.find_one({"id": ws["id"]}, {"_id": 0})
+
+
+@api.post("/onboarding")
+async def onboarding(data: m.OnboardingInput, request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    await db.workspaces.update_one({"id": ws["id"]}, {"$set": {
+        "name": data.business_name,
+        "primary_color": data.primary_color,
+        "button_color": data.primary_color,
+        "logo_url": data.logo_url,
+        "updated_at": m.now_iso(),
+    }})
+    # create first collection
+    slug = await unique_slug(db.collections, data.collection_name or data.business_name)
+    col = _new_collection_doc(ws["id"], {
+        "name": data.collection_name or "Customer Testimonials",
+        "slug": slug,
+        "brand_color": data.primary_color,
+        "logo_url": data.logo_url,
+        "published": True,
+    })
+    await db.collections.insert_one(col)
+    await db.users.update_one({"id": user["id"]}, {"$set": {"onboarded": True}})
+    col.pop("_id", None)
+    return {"workspace": await db.workspaces.find_one({"id": ws["id"]}, {"_id": 0}), "collection": col}
+
+
+# ---------- Collections ----------
+def _new_collection_doc(workspace_id: str, data: dict) -> dict:
+    base = m.CollectionInput(**data).model_dump()
+    base.update({
+        "id": m.gen_id("col_"),
+        "workspace_id": workspace_id,
+        "views": 0,
+        "submissions": 0,
+        "created_at": m.now_iso(),
+        "updated_at": m.now_iso(),
+    })
+    return base
+
+
+@api.get("/collections")
+async def list_collections(request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    cols = await db.collections.find({"workspace_id": ws["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    for c in cols:
+        c["testimonial_count"] = await db.testimonials.count_documents({"collection_id": c["id"]})
+    return cols
+
+
+@api.post("/collections")
+async def create_collection(data: m.CollectionInput, request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    slug = await unique_slug(db.collections, data.slug or data.name)
+    doc = data.model_dump()
+    doc["slug"] = slug
+    col = _new_collection_doc(ws["id"], doc)
+    await db.collections.insert_one(col)
+    col.pop("_id", None)
+    return col
+
+
+async def _owned_collection(request: Request, col_id: str):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    col = await db.collections.find_one({"id": col_id, "workspace_id": ws["id"]}, {"_id": 0})
+    if not col:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return ws, col
+
+
+@api.get("/collections/{col_id}")
+async def get_collection(col_id: str, request: Request):
+    _, col = await _owned_collection(request, col_id)
+    return col
+
+
+@api.put("/collections/{col_id}")
+async def update_collection(col_id: str, data: m.CollectionUpdate, request: Request):
+    ws, col = await _owned_collection(request, col_id)
+    upd = {k: v for k, v in data.model_dump(exclude_none=True).items()}
+    if "slug" in upd:
+        upd["slug"] = await unique_slug(db.collections, upd["slug"], exclude_id=col_id)
+    upd["updated_at"] = m.now_iso()
+    await db.collections.update_one({"id": col_id}, {"$set": upd})
+    return await db.collections.find_one({"id": col_id}, {"_id": 0})
+
+
+@api.delete("/collections/{col_id}")
+async def delete_collection(col_id: str, request: Request):
+    ws, col = await _owned_collection(request, col_id)
+    await db.collections.delete_one({"id": col_id})
+    return {"ok": True}
+
+
+# ---------- Testimonials ----------
+@api.get("/testimonials")
+async def list_testimonials(request: Request, status: str = None, collection_id: str = None,
+                            tag: str = None, type: str = None, featured: bool = None, search: str = None):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    q = {"workspace_id": ws["id"]}
+    if status:
+        q["status"] = status
+    if collection_id:
+        q["collection_id"] = collection_id
+    if tag:
+        q["tags"] = tag
+    if featured is not None:
+        q["featured"] = featured
+    if type == "video":
+        q["video_url"] = {"$ne": None}
+    elif type == "text":
+        q["video_url"] = None
+    items = await db.testimonials.find(q, {"_id": 0}).sort("submitted_at", -1).to_list(500)
+    if search:
+        s = search.lower()
+        items = [t for t in items if s in (t.get("text", "") or "").lower()
+                 or s in (t.get("first_name", "") or "").lower()
+                 or s in (t.get("last_name", "") or "").lower()
+                 or s in (t.get("company", "") or "").lower()]
+    return items
+
+
+@api.get("/testimonials/{tid}")
+async def get_testimonial(tid: str, request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    t = await db.testimonials.find_one({"id": tid, "workspace_id": ws["id"]}, {"_id": 0})
+    if not t:
+        raise HTTPException(status_code=404, detail="Testimonial not found")
+    return t
+
+
+async def _owned_testimonial(request: Request, tid: str):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    t = await db.testimonials.find_one({"id": tid, "workspace_id": ws["id"]}, {"_id": 0})
+    if not t:
+        raise HTTPException(status_code=404, detail="Testimonial not found")
+    return ws, t
+
+
+@api.put("/testimonials/{tid}")
+async def update_testimonial(tid: str, data: m.TestimonialUpdate, request: Request):
+    ws, t = await _owned_testimonial(request, tid)
+    upd = {k: v for k, v in data.model_dump(exclude_none=True).items()}
+    if upd.get("status") == "approved" and t.get("status") != "approved":
+        upd["approved_at"] = m.now_iso()
+    upd["updated_at"] = m.now_iso()
+    await db.testimonials.update_one({"id": tid}, {"$set": upd})
+    return await db.testimonials.find_one({"id": tid}, {"_id": 0})
+
+
+@api.post("/testimonials/{tid}/status")
+async def set_status(tid: str, data: m.StatusInput, request: Request):
+    ws, t = await _owned_testimonial(request, tid)
+    if data.status not in ["pending", "approved", "rejected", "archived"]:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    upd = {"status": data.status, "updated_at": m.now_iso()}
+    if data.status == "approved":
+        upd["approved_at"] = m.now_iso()
+    await db.testimonials.update_one({"id": tid}, {"$set": upd})
+    return await db.testimonials.find_one({"id": tid}, {"_id": 0})
+
+
+@api.post("/testimonials/{tid}/feature")
+async def toggle_feature(tid: str, request: Request):
+    ws, t = await _owned_testimonial(request, tid)
+    await db.testimonials.update_one({"id": tid}, {"$set": {"featured": not t.get("featured", False)}})
+    return await db.testimonials.find_one({"id": tid}, {"_id": 0})
+
+
+@api.post("/testimonials/{tid}/tags")
+async def add_tag(tid: str, data: m.TagInput, request: Request):
+    ws, t = await _owned_testimonial(request, tid)
+    tags = set(t.get("tags", []))
+    tags.add(data.tag)
+    await db.testimonials.update_one({"id": tid}, {"$set": {"tags": list(tags)}})
+    if not await db.tags.find_one({"workspace_id": ws["id"], "name": data.tag}):
+        await db.tags.insert_one({"id": m.gen_id("tag_"), "workspace_id": ws["id"], "name": data.tag, "created_at": m.now_iso()})
+    return await db.testimonials.find_one({"id": tid}, {"_id": 0})
+
+
+@api.delete("/testimonials/{tid}/tags/{tag}")
+async def remove_tag(tid: str, tag: str, request: Request):
+    ws, t = await _owned_testimonial(request, tid)
+    tags = [x for x in t.get("tags", []) if x != tag]
+    await db.testimonials.update_one({"id": tid}, {"$set": {"tags": tags}})
+    return await db.testimonials.find_one({"id": tid}, {"_id": 0})
+
+
+@api.delete("/testimonials/{tid}")
+async def delete_testimonial(tid: str, request: Request):
+    ws, t = await _owned_testimonial(request, tid)
+    await db.testimonials.delete_one({"id": tid})
+    return {"ok": True}
+
+
+@api.get("/tags")
+async def list_tags(request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    tags = await db.tags.find({"workspace_id": ws["id"]}, {"_id": 0}).to_list(200)
+    return tags
+
+
+# ---------- Widgets ----------
+DEFAULT_WIDGET_CONFIG = {
+    "source": "approved",  # approved | featured | tag
+    "tag": None,
+    "theme": "dark",
+    "columns": 3,
+    "limit": 9,
+    "show_photo": True,
+    "show_company": True,
+    "show_role": True,
+    "show_rating": True,
+    "show_video": True,
+    "accent_color": "#ff5722",
+    "border_radius": 16,
+    "autoplay": True,
+}
+
+
+@api.get("/widgets")
+async def list_widgets(request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    return await db.widgets.find({"workspace_id": ws["id"]}, {"_id": 0}).sort("created_at", -1).to_list(200)
+
+
+@api.post("/widgets")
+async def create_widget(data: m.WidgetInput, request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    config = {**DEFAULT_WIDGET_CONFIG, **(data.configuration or {})}
+    widget = {
+        "id": m.gen_id("wid_"),
+        "workspace_id": ws["id"],
+        "name": data.name,
+        "type": data.type,
+        "configuration": config,
+        "loads": 0,
+        "created_at": m.now_iso(),
+        "updated_at": m.now_iso(),
+    }
+    await db.widgets.insert_one(widget)
+    widget.pop("_id", None)
+    return widget
+
+
+async def _owned_widget(request: Request, wid: str):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    w = await db.widgets.find_one({"id": wid, "workspace_id": ws["id"]}, {"_id": 0})
+    if not w:
+        raise HTTPException(status_code=404, detail="Widget not found")
+    return ws, w
+
+
+@api.get("/widgets/{wid}")
+async def get_widget(wid: str, request: Request):
+    _, w = await _owned_widget(request, wid)
+    return w
+
+
+@api.put("/widgets/{wid}")
+async def update_widget(wid: str, data: m.WidgetUpdate, request: Request):
+    ws, w = await _owned_widget(request, wid)
+    upd = {}
+    if data.name is not None:
+        upd["name"] = data.name
+    if data.type is not None:
+        upd["type"] = data.type
+    if data.configuration is not None:
+        upd["configuration"] = {**w.get("configuration", {}), **data.configuration}
+    upd["updated_at"] = m.now_iso()
+    await db.widgets.update_one({"id": wid}, {"$set": upd})
+    return await db.widgets.find_one({"id": wid}, {"_id": 0})
+
+
+@api.delete("/widgets/{wid}")
+async def delete_widget(wid: str, request: Request):
+    ws, w = await _owned_widget(request, wid)
+    await db.widgets.delete_one({"id": wid})
+    return {"ok": True}
+
+
+# ---------- Overview & Analytics ----------
+@api.get("/overview")
+async def overview(request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    wid = ws["id"]
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    total = await db.testimonials.count_documents({"workspace_id": wid})
+    approved = await db.testimonials.count_documents({"workspace_id": wid, "status": "approved"})
+    pending = await db.testimonials.count_documents({"workspace_id": wid, "status": "pending"})
+    video = await db.testimonials.count_documents({"workspace_id": wid, "video_url": {"$ne": None}})
+    written = await db.testimonials.count_documents({"workspace_id": wid, "video_url": None})
+    this_month = await db.testimonials.count_documents({"workspace_id": wid, "submitted_at": {"$gte": month_start}})
+    featured = await db.testimonials.count_documents({"workspace_id": wid, "featured": True})
+    views = await db.analytics_events.count_documents({"workspace_id": wid, "event_type": "collection_view"})
+    widget_loads = await db.analytics_events.count_documents({"workspace_id": wid, "event_type": "widget_load"})
+    recent = await db.testimonials.find({"workspace_id": wid}, {"_id": 0}).sort("submitted_at", -1).to_list(6)
+    return {
+        "total": total, "new": pending, "approved": approved, "video": video,
+        "written": written, "this_month": this_month, "featured": featured,
+        "displayed": approved, "views": views, "widget_loads": widget_loads,
+        "recent": recent,
+    }
+
+
+@api.get("/analytics")
+async def analytics(request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    wid = ws["id"]
+    # last 14 days submissions
+    days = []
+    for i in range(13, -1, -1):
+        d = (datetime.now(timezone.utc) - timedelta(days=i))
+        start = d.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = start + timedelta(days=1)
+        count = await db.testimonials.count_documents({
+            "workspace_id": wid,
+            "submitted_at": {"$gte": start.isoformat(), "$lt": end.isoformat()},
+        })
+        views = await db.analytics_events.count_documents({
+            "workspace_id": wid, "event_type": "collection_view",
+            "created_at": {"$gte": start.isoformat(), "$lt": end.isoformat()},
+        })
+        days.append({"date": start.strftime("%b %d"), "submissions": count, "views": views})
+    total_views = await db.analytics_events.count_documents({"workspace_id": wid, "event_type": "collection_view"})
+    total_subs = await db.testimonials.count_documents({"workspace_id": wid})
+    widget_loads = await db.analytics_events.count_documents({"workspace_id": wid, "event_type": "widget_load"})
+    video = await db.testimonials.count_documents({"workspace_id": wid, "video_url": {"$ne": None}})
+    written = await db.testimonials.count_documents({"workspace_id": wid, "video_url": None})
+    conv = round((total_subs / total_views * 100), 1) if total_views else 0
+    return {
+        "timeseries": days,
+        "total_views": total_views,
+        "total_submissions": total_subs,
+        "conversion_rate": conv,
+        "widget_loads": widget_loads,
+        "video": video,
+        "written": written,
+    }
+
+
+@api.post("/analytics/event")
+async def record_event(data: m.AnalyticsEventInput, request: Request):
+    # public event recorder; find workspace via widget/collection
+    ws_id = None
+    if data.widget_id:
+        w = await db.widgets.find_one({"id": data.widget_id}, {"_id": 0, "workspace_id": 1})
+        ws_id = w["workspace_id"] if w else None
+    elif data.collection_id:
+        c = await db.collections.find_one({"id": data.collection_id}, {"_id": 0, "workspace_id": 1})
+        ws_id = c["workspace_id"] if c else None
+    if not ws_id:
+        return {"ok": False}
+    await db.analytics_events.insert_one({
+        "id": m.gen_id("ev_"),
+        "workspace_id": ws_id,
+        "widget_id": data.widget_id,
+        "collection_id": data.collection_id,
+        "event_type": data.event_type,
+        "metadata": data.metadata,
+        "created_at": m.now_iso(),
+    })
+    return {"ok": True}
+
+
+# ---------- Upload / Media ----------
+ALLOWED_MIME = {
+    "image/jpeg", "image/png", "image/webp", "image/gif",
+    "video/webm", "video/mp4", "video/quicktime", "video/ogg",
+}
+MAX_SIZE = 80 * 1024 * 1024  # 80MB
+
+
+@api.post("/upload")
+async def upload(request: Request, file: UploadFile = File(...)):
+    rate_limit(f"upload:{request.client.host}", 30, 60)
+    ct = file.content_type or "application/octet-stream"
+    if ct not in ALLOWED_MIME:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
+    data = await file.read()
+    if len(data) > MAX_SIZE:
+        raise HTTPException(status_code=400, detail="File too large (max 80MB)")
+    ext = (file.filename or "bin").split(".")[-1].lower()
+    path = f"{APP_NAME}/uploads/{uuid.uuid4().hex}.{ext}"
+    try:
+        result = put_object(path, data, ct)
+    except Exception as e:
+        logger.error(f"Upload failed: {e}")
+        raise HTTPException(status_code=500, detail="Upload failed. Please try again.")
+    await db.files.insert_one({
+        "id": m.gen_id("file_"),
+        "storage_path": result["path"],
+        "content_type": ct,
+        "size": len(data),
+        "is_deleted": False,
+        "created_at": m.now_iso(),
+    })
+    return {"url": f"/api/media/{result['path']}", "path": result["path"]}
+
+
+@api.get("/media/{path:path}")
+async def media(path: str):
+    rec = await db.files.find_one({"storage_path": path, "is_deleted": False}, {"_id": 0})
+    if not rec:
+        raise HTTPException(status_code=404, detail="File not found")
+    data, ct = get_object(path)
+    return Response(content=data, media_type=rec.get("content_type", ct),
+                    headers={"Cache-Control": "public, max-age=31536000"})
+
+
+# ---------- Public collection ----------
+def _public_collection(col: dict, ws: dict) -> dict:
+    return {
+        "id": col["id"], "name": col["name"], "slug": col["slug"],
+        "headline": col.get("headline"), "description": col.get("description"),
+        "logo_url": col.get("logo_url") or ws.get("logo_url"),
+        "brand_color": col.get("brand_color"), "background_color": col.get("background_color"),
+        "welcome_video_url": col.get("welcome_video_url"),
+        "allow_video": col.get("allow_video", True), "allow_text": col.get("allow_text", True),
+        "require_email": col.get("require_email", True), "require_company": col.get("require_company", False),
+        "require_role": col.get("require_role", False), "collect_rating": col.get("collect_rating", True),
+        "custom_questions": col.get("custom_questions", []),
+        "thank_you_message": col.get("thank_you_message"), "redirect_url": col.get("redirect_url"),
+        "business_name": ws.get("name"),
+    }
+
+
+@api.get("/public/collection/{slug}")
+async def public_collection(slug: str):
+    col = await db.collections.find_one({"slug": slug}, {"_id": 0})
+    if not col or not col.get("published"):
+        raise HTTPException(status_code=404, detail="Collection page not found or unpublished")
+    ws = await db.workspaces.find_one({"id": col["workspace_id"]}, {"_id": 0})
+    await db.collections.update_one({"id": col["id"]}, {"$inc": {"views": 1}})
+    await db.analytics_events.insert_one({
+        "id": m.gen_id("ev_"), "workspace_id": ws["id"], "collection_id": col["id"],
+        "widget_id": None, "event_type": "collection_view", "metadata": {}, "created_at": m.now_iso(),
+    })
+    return _public_collection(col, ws)
+
+
+@api.post("/public/collection/{slug}/submit")
+async def submit_testimonial(slug: str, data: m.TestimonialSubmit, request: Request):
+    rate_limit(f"submit:{request.client.host}", 5, 300)
+    if data.honeypot:
+        raise HTTPException(status_code=400, detail="Spam detected")
+    col = await db.collections.find_one({"slug": slug}, {"_id": 0})
+    if not col or not col.get("published"):
+        raise HTTPException(status_code=404, detail="Collection page not found")
+    if not verify_recaptcha(data.recaptcha_token):
+        raise HTTPException(status_code=400, detail="Captcha verification failed. Please try again.")
+    if not data.text and not data.video_url:
+        raise HTTPException(status_code=400, detail="Please provide a written or video testimonial")
+    if not data.consent:
+        raise HTTPException(status_code=400, detail="Consent is required to submit")
+    if col.get("require_email") and not (data.email or "").strip():
+        raise HTTPException(status_code=400, detail="Email is required")
+    if col.get("require_company") and not (data.company or "").strip():
+        raise HTTPException(status_code=400, detail="Company is required")
+    if col.get("require_role") and not (data.role or "").strip():
+        raise HTTPException(status_code=400, detail="Job title is required")
+    ws = await db.workspaces.find_one({"id": col["workspace_id"]}, {"_id": 0})
+    doc = {
+        "id": m.gen_id("tst_"),
+        "workspace_id": ws["id"],
+        "collection_id": col["id"],
+        "first_name": data.first_name.strip(),
+        "last_name": (data.last_name or "").strip(),
+        "email": (data.email or "").strip().lower(),
+        "company": (data.company or "").strip(),
+        "role": (data.role or "").strip(),
+        "website": (data.website or "").strip(),
+        "avatar_url": data.avatar_url,
+        "text": (data.text or "").strip(),
+        "video_url": data.video_url,
+        "video_thumbnail_url": data.video_thumbnail_url,
+        "rating": data.rating,
+        "status": "pending",
+        "featured": False,
+        "consent": data.consent,
+        "consent_text": f"I give {ws.get('name')} permission to use this testimonial on its website and marketing materials.",
+        "consent_at": m.now_iso() if data.consent else None,
+        "custom_answers": data.custom_answers,
+        "tags": [],
+        "notes": "",
+        "source": col["name"],
+        "submitted_at": m.now_iso(),
+        "approved_at": None,
+        "created_at": m.now_iso(),
+        "updated_at": m.now_iso(),
+    }
+    await db.testimonials.insert_one(doc)
+    await db.collections.update_one({"id": col["id"]}, {"$inc": {"submissions": 1}})
+    # notify owner
+    owner = await db.users.find_one({"id": ws["owner_id"]}, {"_id": 0})
+    if owner and owner.get("email"):
+        preview = doc["text"][:140] if doc["text"] else "New video testimonial"
+        app_origin = os.environ.get("CORS_ORIGINS", "").split(",")[0]
+        view_url = f"{app_origin}/dashboard/testimonials/{doc['id']}"
+        await send_email(owner["email"], "You received a new testimonial 🎉",
+                         new_testimonial_email(f"{doc['first_name']} {doc['last_name']}".strip(), preview, bool(doc["video_url"]), view_url))
+    if doc["email"]:
+        await send_email(doc["email"], f"Thanks for your testimonial!", welcome_submission_email(doc["first_name"], ws.get("name")))
+    return {"ok": True, "thank_you_message": col.get("thank_you_message"), "redirect_url": col.get("redirect_url")}
+
+
+# ---------- Public widget ----------
+def _public_testimonial(t: dict) -> dict:
+    return {
+        "id": t["id"], "first_name": t.get("first_name"), "last_name": t.get("last_name"),
+        "company": t.get("company"), "role": t.get("role"), "avatar_url": t.get("avatar_url"),
+        "text": t.get("text"), "video_url": t.get("video_url"),
+        "video_thumbnail_url": t.get("video_thumbnail_url"), "rating": t.get("rating"),
+        "featured": t.get("featured"),
+    }
+
+
+@api.get("/public/widget/{wid}")
+async def public_widget(wid: str, request: Request):
+    w = await db.widgets.find_one({"id": wid}, {"_id": 0})
+    if not w:
+        raise HTTPException(status_code=404, detail="Widget not found")
+    cfg = w.get("configuration", {})
+    q = {"workspace_id": w["workspace_id"], "status": "approved"}
+    if cfg.get("source") == "featured":
+        q["featured"] = True
+    elif cfg.get("source") == "tag" and cfg.get("tag"):
+        q["tags"] = cfg["tag"]
+    limit = int(cfg.get("limit", 9) or 9)
+    items = await db.testimonials.find(q, {"_id": 0}).sort("approved_at", -1).to_list(limit)
+    ws = await db.workspaces.find_one({"id": w["workspace_id"]}, {"_id": 0})
+    await db.widgets.update_one({"id": wid}, {"$inc": {"loads": 1}})
+    await db.analytics_events.insert_one({
+        "id": m.gen_id("ev_"), "workspace_id": w["workspace_id"], "widget_id": wid,
+        "collection_id": None, "event_type": "widget_load", "metadata": {}, "created_at": m.now_iso(),
+    })
+    return {
+        "id": w["id"], "name": w["name"], "type": w["type"], "configuration": cfg,
+        "business_name": ws.get("name") if ws else "",
+        "testimonials": [_public_testimonial(t) for t in items],
+    }
+
+
+@api.get("/widget.js")
+async def widget_js():
+    js = """(function(){
+  var scripts = document.querySelectorAll('script[data-widget-id]');
+  scripts.forEach(function(s){
+    if(s.getAttribute('data-testify-init'))return;
+    s.setAttribute('data-testify-init','1');
+    var id = s.getAttribute('data-widget-id');
+    var origin = new URL(s.src).origin;
+    var iframe = document.createElement('iframe');
+    iframe.src = origin + '/embed/' + id;
+    iframe.style.width='100%';iframe.style.border='0';iframe.style.overflow='hidden';
+    iframe.setAttribute('scrolling','no');iframe.setAttribute('title','Testimonials');
+    iframe.style.minHeight='200px';
+    s.parentNode.insertBefore(iframe,s);
+    window.addEventListener('message',function(e){
+      if(e.data && e.data.type==='testify-resize' && e.data.widgetId===id){iframe.style.height=e.data.height+'px';}
+    });
+  });
+})();"""
+    return PlainTextResponse(js, media_type="application/javascript",
+                             headers={"Cache-Control": "public, max-age=300"})
+
+
+app.include_router(api)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=False,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.on_event("startup")
+async def startup():
+    await ensure_indexes()
+    try:
+        init_storage()
+        logger.info("Storage initialized")
+    except Exception as e:
+        logger.error(f"Storage init failed: {e}")
+    try:
+        await authlib.seed_admin()
+    except Exception as e:
+        logger.error(f"Admin seed failed: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    from db import client
+    client.close()
