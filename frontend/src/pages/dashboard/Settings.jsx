@@ -13,6 +13,8 @@ import { Save, Upload, Loader2, Sun, Moon, Crown } from "lucide-react";
 import { toast } from "sonner";
 import AdminIntegrations from "@/components/dashboard/AdminIntegrations";
 import Billing from "@/components/dashboard/Billing";
+import TeamMembers from "@/components/dashboard/TeamMembers";
+import CustomDomain from "@/components/dashboard/CustomDomain";
 
 function Card({ title, desc, children }) {
   return (
@@ -85,6 +87,10 @@ export default function Settings() {
         </Card>
 
         <Billing currentPlan={ws.plan || "free"} />
+
+        <TeamMembers />
+
+        <CustomDomain workspace={ws} />
 
         {user?.is_admin && <AdminIntegrations />}
       </div>

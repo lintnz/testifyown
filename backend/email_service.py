@@ -56,3 +56,15 @@ def password_reset_email(reset_url: str) -> str:
       <p style="color:#888;font-size:13px;margin-top:16px">If you didn't request this, you can safely ignore this email.</p>
     </div>
     """
+
+
+def team_invite_email(business: str, inviter: str, role: str, url: str, has_account: bool) -> str:
+    action = "Log in to join" if has_account else "Create your free account to join"
+    return f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px">
+      <h1 style="font-size:22px">You've been invited to {business} 🎉</h1>
+      <p><strong>{inviter}</strong> invited you to collaborate on <strong>{business}</strong>'s testimonials as a <strong>{role}</strong>.</p>
+      <a href="{url}" style="display:inline-block;background:#ff5722;color:#fff;text-decoration:none;padding:12px 24px;border-radius:10px;font-weight:600">{action}</a>
+      <p style="color:#888;font-size:13px;margin-top:16px">If you weren't expecting this, you can ignore this email.</p>
+    </div>
+    """

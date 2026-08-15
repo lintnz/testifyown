@@ -26,6 +26,7 @@ from email_service import (
     new_testimonial_email,
     welcome_submission_email,
     password_reset_email,
+    team_invite_email,
 )
 from captcha import verify_recaptcha
 from settings_store import get_settings, get_setting, update_settings
@@ -91,6 +92,19 @@ async def require_admin(request: Request) -> dict:
     return user
 
 
+async def _accept_pending_invites(user: dict):
+    """Turn any pending team invites for this user's email into memberships."""
+    invites = await db.invites.find({"email": user["email"].lower(), "status": "pending"}).to_list(50)
+    for inv in invites:
+        exists = await db.workspace_members.find_one({"workspace_id": inv["workspace_id"], "user_id": user["id"]})
+        if not exists:
+            await db.workspace_members.insert_one({
+                "id": m.gen_id("wm_"), "workspace_id": inv["workspace_id"], "user_id": user["id"],
+                "role": inv.get("role", "member"), "created_at": m.now_iso(),
+            })
+        await db.invites.update_one({"id": inv["id"]}, {"$set": {"status": "accepted"}})
+
+
 # ---------- Auth ----------
 @api.post("/auth/register")
 async def register(data: m.RegisterInput):
@@ -113,6 +127,7 @@ async def register(data: m.RegisterInput):
     }
     await db.users.insert_one(user)
     await _create_default_workspace(uid, data.name)
+    await _accept_pending_invites(user)
     token = authlib.create_access_token(uid, email)
     return {"token": token, "user": public_user(user)}
 
@@ -127,6 +142,7 @@ async def login(data: m.LoginInput, request: Request):
         await authlib.record_failed_login(ident)
         raise HTTPException(status_code=401, detail="Invalid email or password")
     await authlib.clear_login_attempts(ident)
+    await _accept_pending_invites(user)
     token = authlib.create_access_token(user["id"], email)
     return {"token": token, "user": public_user(user)}
 
@@ -155,6 +171,7 @@ async def google_auth(data: m.GoogleSessionInput):
         await _create_default_workspace(uid, user["name"])
     else:
         await db.users.update_one({"id": user["id"]}, {"$set": {"avatar": info.get("picture") or user.get("avatar")}})
+    await _accept_pending_invites(user)
     token = authlib.create_access_token(user["id"], email)
     return {"token": token, "user": public_user(user)}
 
@@ -272,7 +289,9 @@ async def update_workspace(data: m.WorkspaceUpdate, request: Request):
 @api.post("/onboarding")
 async def onboarding(data: m.OnboardingInput, request: Request):
     user = await authlib.get_current_user(request)
-    ws = await authlib.get_user_workspace(user)
+    ws = await db.workspaces.find_one({"owner_id": user["id"]}, {"_id": 0})
+    if not ws:
+        ws = await _create_default_workspace(user["id"], data.business_name)
     await db.workspaces.update_one({"id": ws["id"]}, {"$set": {
         "name": data.business_name,
         "primary_color": data.primary_color,
@@ -1008,6 +1027,159 @@ async def widget_js():
 })();"""
     return PlainTextResponse(js, media_type="application/javascript",
                              headers={"Cache-Control": "public, max-age=300"})
+
+
+# ---------- Team members ----------
+async def _require_manage(request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    role = await authlib.get_ws_role(user["id"], ws["id"])
+    if ws.get("owner_id") != user["id"] and role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail="Only owners and admins can manage the team")
+    return user, ws
+
+
+@api.get("/members")
+async def list_members(request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    mems = await db.workspace_members.find({"workspace_id": ws["id"]}, {"_id": 0}).to_list(100)
+    out = []
+    for mem in mems:
+        u = await db.users.find_one({"id": mem["user_id"]}, {"_id": 0, "password_hash": 0})
+        if u:
+            out.append({"user_id": u["id"], "name": u["name"], "email": u["email"], "avatar": u.get("avatar"),
+                        "role": mem["role"], "is_owner": u["id"] == ws.get("owner_id"), "joined_at": mem.get("created_at")})
+    invites = await db.invites.find({"workspace_id": ws["id"], "status": "pending"}, {"_id": 0}).to_list(100)
+    my_role = await authlib.get_ws_role(user["id"], ws["id"])
+    return {"members": out, "invites": [{"email": i["email"], "role": i["role"]} for i in invites],
+            "can_manage": ws.get("owner_id") == user["id"] or my_role in ("owner", "admin"),
+            "plan": ws.get("plan", "free")}
+
+
+@api.post("/members/invite")
+async def invite_member(data: m.InviteInput, request: Request):
+    user, ws = await _require_manage(request)
+    if ws.get("plan") != "business":
+        raise HTTPException(status_code=402, detail="Team members are a Business plan feature. Upgrade to invite teammates.")
+    if data.role not in ("admin", "member"):
+        raise HTTPException(status_code=400, detail="Invalid role")
+    email = data.email.lower()
+    existing_user = await db.users.find_one({"email": email})
+    if existing_user:
+        already = await db.workspace_members.find_one({"workspace_id": ws["id"], "user_id": existing_user["id"]})
+        if already:
+            raise HTTPException(status_code=400, detail="This person is already on your team")
+        await db.workspace_members.insert_one({
+            "id": m.gen_id("wm_"), "workspace_id": ws["id"], "user_id": existing_user["id"],
+            "role": data.role, "created_at": m.now_iso(),
+        })
+        status = "added"
+    else:
+        await db.invites.update_one(
+            {"workspace_id": ws["id"], "email": email},
+            {"$set": {"id": m.gen_id("inv_"), "workspace_id": ws["id"], "email": email, "role": data.role,
+                      "invited_by": user["name"], "status": "pending", "created_at": m.now_iso()}},
+            upsert=True,
+        )
+        status = "invited"
+    app_origin = os.environ.get("CORS_ORIGINS", "").split(",")[0]
+    url = f"{app_origin}/{'login' if existing_user else 'register'}"
+    await send_email(email, f"You're invited to join {ws.get('name')} on Testify",
+                     team_invite_email(ws.get("name"), user["name"], data.role, url, bool(existing_user)))
+    return {"status": status}
+
+
+@api.delete("/members/{user_id}")
+async def remove_member(user_id: str, request: Request):
+    user, ws = await _require_manage(request)
+    if user_id == ws.get("owner_id"):
+        raise HTTPException(status_code=400, detail="The workspace owner cannot be removed")
+    mem = await db.workspace_members.find_one({"workspace_id": ws["id"], "user_id": user_id})
+    if not mem:
+        raise HTTPException(status_code=404, detail="Member not found")
+    await db.workspace_members.delete_one({"workspace_id": ws["id"], "user_id": user_id})
+    await db.users.update_one({"id": user_id, "active_workspace_id": ws["id"]}, {"$set": {"active_workspace_id": None}})
+    return {"ok": True}
+
+
+@api.get("/workspaces/mine")
+async def my_workspaces(request: Request):
+    user = await authlib.get_current_user(request)
+    mems = await db.workspace_members.find({"user_id": user["id"]}, {"_id": 0}).to_list(50)
+    active = (await authlib.get_user_workspace(user))["id"]
+    out = []
+    for mem in mems:
+        ws = await db.workspaces.find_one({"id": mem["workspace_id"]}, {"_id": 0})
+        if ws:
+            out.append({"id": ws["id"], "name": ws["name"], "role": mem["role"],
+                        "is_owner": ws.get("owner_id") == user["id"], "active": ws["id"] == active})
+    return out
+
+
+@api.post("/workspaces/switch")
+async def switch_workspace(data: m.SwitchWorkspaceInput, request: Request):
+    user = await authlib.get_current_user(request)
+    mem = await db.workspace_members.find_one({"workspace_id": data.workspace_id, "user_id": user["id"]})
+    if not mem:
+        raise HTTPException(status_code=403, detail="You don't have access to that workspace")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"active_workspace_id": data.workspace_id}})
+    return {"ok": True}
+
+
+# ---------- Custom domain ----------
+@api.put("/workspace/domain")
+async def set_domain(data: m.DomainInput, request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    if ws.get("owner_id") != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the owner can manage the custom domain")
+    if ws.get("plan") != "business":
+        raise HTTPException(status_code=402, detail="Custom domains are a Business plan feature.")
+    domain = re.sub(r"^https?://", "", data.domain.strip().lower()).strip("/")
+    if not re.match(r"^[a-z0-9.-]+\.[a-z]{2,}$", domain):
+        raise HTTPException(status_code=400, detail="Please enter a valid domain like reviews.yourbrand.com")
+    token = "testify-verify=" + secrets.token_hex(12)
+    await db.workspaces.update_one({"id": ws["id"]}, {"$set": {
+        "custom_domain": domain, "domain_status": "pending", "domain_token": token, "updated_at": m.now_iso(),
+    }})
+    return await db.workspaces.find_one({"id": ws["id"]}, {"_id": 0})
+
+
+@api.post("/workspace/domain/verify")
+async def verify_domain(request: Request):
+    import dns.resolver
+    rate_limit(f"domverify:{request.client.host}", 10, 60)
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    if ws.get("owner_id") != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the owner can verify the domain")
+    domain = ws.get("custom_domain")
+    token = ws.get("domain_token", "")
+    if not domain:
+        raise HTTPException(status_code=400, detail="No custom domain set")
+    verified = False
+    try:
+        answers = dns.resolver.resolve(f"_testify.{domain}", "TXT", lifetime=6)
+        for r in answers:
+            if token.split("=")[-1] in r.to_text().strip('"'):
+                verified = True
+                break
+    except Exception:
+        verified = False
+    status = "verified" if verified else "failed"
+    await db.workspaces.update_one({"id": ws["id"]}, {"$set": {"domain_status": status, "updated_at": m.now_iso()}})
+    return {"status": status, "domain": domain}
+
+
+@api.delete("/workspace/domain")
+async def remove_domain(request: Request):
+    user = await authlib.get_current_user(request)
+    ws = await authlib.get_user_workspace(user)
+    if ws.get("owner_id") != user["id"]:
+        raise HTTPException(status_code=403, detail="Only the owner can manage the custom domain")
+    await db.workspaces.update_one({"id": ws["id"]}, {"$unset": {"custom_domain": "", "domain_status": "", "domain_token": ""}})
+    return {"ok": True}
 
 
 # ---------- Payments (Stripe subscriptions) ----------

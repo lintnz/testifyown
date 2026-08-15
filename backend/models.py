@@ -192,3 +192,16 @@ class CheckoutInput(BaseModel):
 
 class PortalInput(BaseModel):
     origin_url: str
+
+
+class InviteInput(BaseModel):
+    email: EmailStr
+    role: str = "member"  # admin | member
+
+
+class SwitchWorkspaceInput(BaseModel):
+    workspace_id: str
+
+
+class DomainInput(BaseModel):
+    domain: str

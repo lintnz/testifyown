@@ -2,11 +2,13 @@ import React, { useState } from "react";
 import { Outlet, NavLink, useNavigate, Navigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { useTheme } from "@/context/ThemeContext";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import api from "@/lib/api";
 import Logo from "@/components/Logo";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
-import { LayoutDashboard, MessageSquareQuote, FolderOpen, LayoutGrid, BarChart3, Settings as SettingsIcon, Menu, X, LogOut, Sun, Moon, Plus } from "lucide-react";
+import { LayoutDashboard, MessageSquareQuote, FolderOpen, LayoutGrid, BarChart3, Settings as SettingsIcon, Menu, X, LogOut, Sun, Moon, Plus, ChevronsUpDown, Check, Building2 } from "lucide-react";
 import { mediaUrl } from "@/lib/api";
 
 const NAV = [
@@ -22,7 +24,15 @@ export default function DashboardLayout() {
   const { user, logout } = useAuth();
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const [open, setOpen] = useState(false);
+
+  const { data: workspaces = [] } = useQuery({ queryKey: ["my-workspaces"], queryFn: async () => (await api.get("/workspaces/mine")).data });
+  const switchWs = useMutation({
+    mutationFn: (id) => api.post("/workspaces/switch", { workspace_id: id }),
+    onSuccess: () => { window.location.reload(); },
+  });
+  const activeWs = workspaces.find((w) => w.active);
 
   const handleLogout = async () => { await logout(); navigate("/login"); };
 
@@ -65,7 +75,27 @@ export default function DashboardLayout() {
       <div className="flex-1 lg:ml-64 flex flex-col min-w-0">
         <header className="h-16 border-b border-border flex items-center justify-between px-4 sm:px-6 sticky top-0 bg-background/80 backdrop-blur z-40">
           <button className="lg:hidden" onClick={() => setOpen(true)} data-testid="mobile-nav-btn"><Menu size={22} /></button>
-          <div className="hidden lg:block" />
+          {workspaces.length > 1 ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-border hover:bg-secondary/60 transition-colors" data-testid="workspace-switcher">
+                  <Building2 size={15} className="text-muted-foreground" />
+                  <span className="text-sm font-medium max-w-[160px] truncate">{activeWs?.name || "Workspace"}</span>
+                  <ChevronsUpDown size={14} className="text-muted-foreground" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-56">
+                {workspaces.map((w) => (
+                  <DropdownMenuItem key={w.id} onClick={() => !w.active && switchWs.mutate(w.id)} data-testid={`ws-option-${w.id}`}>
+                    <Building2 size={14} className="mr-2 text-muted-foreground" />
+                    <span className="flex-1 truncate">{w.name}</span>
+                    <span className="text-xs text-muted-foreground capitalize mr-1">{w.role}</span>
+                    {w.active && <Check size={14} className="text-primary" />}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : <div className="hidden lg:block" />}
           <div className="flex items-center gap-3">
             <Button size="sm" className="gap-1.5 hidden sm:flex" onClick={() => navigate("/dashboard/collections")} data-testid="collect-cta">
               <Plus size={16} /> Collect a testimonial

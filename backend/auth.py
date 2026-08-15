@@ -61,10 +61,25 @@ async def get_current_user(request: Request) -> dict:
 
 
 async def get_user_workspace(user: dict) -> dict:
+    """Resolve the workspace the user is currently acting in.
+    Uses active_workspace_id when the user is a member of it, else falls back
+    to the workspace they own."""
+    active_id = user.get("active_workspace_id")
+    if active_id:
+        mem = await db.workspace_members.find_one({"workspace_id": active_id, "user_id": user["id"]})
+        if mem:
+            ws = await db.workspaces.find_one({"id": active_id}, {"_id": 0})
+            if ws:
+                return ws
     ws = await db.workspaces.find_one({"owner_id": user["id"]}, {"_id": 0})
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
     return ws
+
+
+async def get_ws_role(user_id: str, workspace_id: str) -> str:
+    mem = await db.workspace_members.find_one({"workspace_id": workspace_id, "user_id": user_id})
+    return mem.get("role") if mem else None
 
 
 def exchange_google_session(session_id: str) -> dict:
